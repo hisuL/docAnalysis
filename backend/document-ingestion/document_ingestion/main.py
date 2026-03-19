@@ -1,14 +1,20 @@
+import json
+import asyncio
+
 from fastapi import FastAPI, Response
 from pydantic_settings import BaseSettings
 
 from document_ingestion import __version__
 
 
+DEFAULT_DB_URL = "postgresql://postgres:postgres@localhost:5432/ingestion"
+
+
 class Settings(BaseSettings):
     """Application settings."""
 
     # Use plain PostgreSQL URL format for asyncpg (without +asyncpg driver prefix)
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/ingestion"
+    database_url: str = ""  # Require explicit setting
     redis_url: str = "redis://localhost:6379/1"
 
     class Config:
@@ -52,29 +58,49 @@ async def readiness():
     import asyncpg
     import redis.asyncio as redis
 
+    # Validate required settings
+    if not settings.database_url:
+        return Response(
+            content=json.dumps({"status": "degraded", "checks": {"database": "database_url not set"}}),
+            status_code=503,
+            media_type="application/json"
+        )
+
     checks = {}
 
-    # Check database
+    # Check database with timeout
     try:
-        conn = await asyncpg.connect(settings.database_url)
-        await conn.close()
+        conn = await asyncio.wait_for(
+            asyncpg.connect(settings.database_url),
+            timeout=5.0
+        )
+        try:
+            await conn.close()
+        finally:
+            pass
         checks["database"] = "ok"
+    except asyncio.TimeoutError:
+        checks["database"] = "timeout"
     except Exception as e:
         checks["database"] = sanitize_error(e)
 
-    # Check Redis
+    # Check Redis with timeout and proper cleanup
     try:
         r = redis.from_url(settings.redis_url)
-        await r.ping()
-        await r.close()
-        checks["redis"] = "ok"
+        try:
+            await asyncio.wait_for(r.ping(), timeout=5.0)
+            checks["redis"] = "ok"
+        finally:
+            await r.close()
+    except asyncio.TimeoutError:
+        checks["redis"] = "timeout"
     except Exception as e:
         checks["redis"] = sanitize_error(e)
 
     all_ok = all(v == "ok" for v in checks.values())
 
     return Response(
-        content='{"status": "' + ("ok" if all_ok else "degraded") + '", "checks": ' + str(checks).replace("'", '"') + '}',
+        content=json.dumps({"status": "ok" if all_ok else "degraded", "checks": checks}),
         status_code=200 if all_ok else 503,
         media_type="application/json"
     )
