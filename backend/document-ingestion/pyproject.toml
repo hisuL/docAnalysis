@@ -18,6 +18,9 @@ dependencies = [
     "pydantic-settings>=2.0.0",
 ]
 
+[project.scripts]
+document-ingestion = "document_ingestion.main:run"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
@@ -25,3 +28,6 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["document_ingestion"]
