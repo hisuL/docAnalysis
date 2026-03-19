@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic_settings import BaseSettings
 
 from conversation_orchestrator import __version__
@@ -7,7 +7,8 @@ from conversation_orchestrator import __version__
 class Settings(BaseSettings):
     """Application settings."""
 
-    database_url: str = "postgresql+asyncpg://localhost/orchestrator"
+    # Use plain PostgreSQL URL format for asyncpg (without +asyncpg driver prefix)
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/orchestrator"
     redis_url: str = "redis://localhost:6379/0"
 
     class Config:
@@ -16,6 +17,21 @@ class Settings(BaseSettings):
 
 settings = Settings()
 app = FastAPI(title="conversation-orchestrator", version=__version__)
+
+
+def sanitize_error(e: Exception) -> str:
+    """Sanitize exception message to avoid leaking sensitive info."""
+    msg = str(e).lower()
+    # Generic error categories
+    if "connection" in msg or "connect" in msg:
+        return "connection_failed"
+    if "auth" in msg or "password" in msg:
+        return "authentication_failed"
+    if "timeout" in msg:
+        return "timeout"
+    if "does not exist" in msg or "no such" in msg:
+        return "database_not_found"
+    return "error"
 
 
 @app.get("/livez")
@@ -44,7 +60,7 @@ async def readiness():
         await conn.close()
         checks["database"] = "ok"
     except Exception as e:
-        checks["database"] = f"error: {str(e)}"
+        checks["database"] = sanitize_error(e)
 
     # Check Redis
     try:
@@ -53,12 +69,15 @@ async def readiness():
         await r.close()
         checks["redis"] = "ok"
     except Exception as e:
-        checks["redis"] = f"error: {str(e)}"
+        checks["redis"] = sanitize_error(e)
 
     all_ok = all(v == "ok" for v in checks.values())
-    status_code = 200 if all_ok else 503
 
-    return {"status": "ok" if all_ok else "degraded", "checks": checks}
+    return Response(
+        content='{"status": "' + ("ok" if all_ok else "degraded") + '", "checks": ' + str(checks).replace("'", '"') + '}',
+        status_code=200 if all_ok else 503,
+        media_type="application/json"
+    )
 
 
 @app.get("/health")
